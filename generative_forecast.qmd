@@ -1,0 +1,320 @@
+---
+title: "generative_forecast"
+author: "Hanzhang Ren"
+format: pdf
+---
+
+```{r setup}
+# Setup
+library(groundhog)
+groundhog.library(
+  c("tidyverse", "arsenal", "lmtest", "sandwich", "ggh4x", "ggthemes"),
+  "2024-04-23"
+)
+```
+
+
+```{r prep}
+# Clean data and produce analytic samples
+data <- read.csv("generative_forecast.csv") |>
+  mutate(
+    log_avg = log(avg), log_mae = log(mae), log_std = log(std),
+    n_alter_factor = factor(n_alter),
+    n_date = factor(
+      if_else(n_date == 1,
+        "No Environmental Feedback", "Environmental Feedback"
+      ),
+      levels = c("No Environmental Feedback", "Environmental Feedback")
+    ),
+    n_explanation = if_else(explanation_on == 1, n_alter, 0),
+    explanation = factor(
+      case_when(
+        n_alter == 0 ~ "Not Applicable",
+        explanation_on == 1 ~ "Provided",
+        explanation_on == 0 ~ "Not Provided"
+      ),
+      levels = c("Not Applicable", "Not Provided", "Provided")
+    )
+  )
+explanation <- filter(data, n_explanation > 0 | n_alter == 0)
+explanation_date1 <- filter(explanation, n_date == "No Environmental Feedback")
+no_explanation <- filter(data, n_explanation < 1 | n_alter == 0)
+no_explanation_alter12 <- filter(no_explanation, n_alter != 0)
+no_explanation_alter01 <- filter(no_explanation, n_alter != 2)
+data_no_outlier <- filter(data, avg < 7000)
+explanation_no_outlier <- filter(explanation, avg < 7000)
+explanation_date1_no_outlier <- filter(explanation_date1, avg < 7000)
+no_explanation_no_outlier <- filter(no_explanation, avg < 7000)
+no_explanation_alter12_no_outlier <- filter(no_explanation_alter12, avg < 7000)
+no_explanation_social_no_alter01 <- filter(no_explanation_alter01, avg < 7000)
+```
+
+```{r analysis}
+# Robust linear regression function
+lm_robust <- function(formula, data) {
+  new_data <- data[data[all.vars(formula)[1]] != -Inf, ]
+  model <- lm(formula, new_data)
+  coeftest(model, vcov=vcovHC(model))
+}
+
+# Exposure to reality reduces overestimation and spread
+# Exposure to others reduces overestimation and spread
+lm_explanation <- lm_robust(avg ~ n_date + n_alter, explanation)
+lm_explanation
+confint(lm_explanation)
+lm_robust(log_avg ~ n_date + n_alter, explanation)
+lm_robust(log_mae ~ n_date + n_alter, explanation)
+lm_robust(std ~ n_date + n_alter, explanation)
+lm_robust(log_std ~ n_date + n_alter, explanation)
+lm_robust(avg ~ n_date + n_alter, explanation_no_outlier)
+lm_robust(std ~ n_date + n_alter, explanation_no_outlier)
+
+# No evidence that exposure to reality reduces overestimation or spread to a 
+# greater degree when there is exposure to others.
+# There is some evidence that exposure to others reduces overestimation
+# specifically among cases with no exposure to reality
+lm_robust(avg ~ n_date * n_alter, explanation)
+lm_robust(log_avg ~ n_date * n_alter, explanation)
+lm_robust(log_mae ~ n_date * n_alter, explanation)
+lm_robust(std ~ n_date * n_alter, explanation)
+lm_robust(log_std ~ n_date * n_alter, explanation)
+lm_robust(avg ~ n_date * n_alter, explanation_no_outlier)
+lm_robust(std ~ n_date * n_alter, explanation_no_outlier)
+
+# There is some evidence that exposure to others reduces overestimation
+# specifically among cases with no exposure to reality
+lm_explanation_date1 <- lm_robust(avg ~ n_alter, explanation_date1)
+lm_explanation_date1
+confint(lm_explanation_date1)
+lm_robust(log_avg ~ n_alter, explanation_date1)
+lm_robust(log_mae ~ n_alter, explanation_date1)
+lm_robust(std ~ n_alter, explanation_date1)
+lm_robust(log_std ~ n_alter, explanation_date1)
+lm_robust(avg ~ n_alter, explanation_no_outlier)
+lm_robust(std ~ n_alter, explanation_no_outlier)
+
+# Exposure to reality reduces overestimation and spread
+# No evidence that exposure to others reduces overestimation when there's no
+# explanation provided by others, but there is evidence that it reduces spread
+lm_no_explanation <- lm_robust(avg ~ n_date + n_alter, no_explanation)
+confint(lm_no_explanation)
+lm_robust(log_avg ~ n_date + n_alter, no_explanation)
+lm_robust(log_mae ~ n_date + n_alter, no_explanation)
+lm_robust(std ~ n_date + n_alter, no_explanation)
+lm_robust(log_std ~ n_date + n_alter, no_explanation)
+lm_robust(avg ~ n_date + n_alter, no_explanation_no_outlier)
+lm_robust(std ~ n_date + n_alter, no_explanation_no_outlier)
+
+# Compute bootstrap CIs for the difference in exposure to others effect
+bootstrap_n_alter <- function(data, i) {
+  if (i == 0) {
+    bootstrapped_data <- data
+  } else {
+    bootstrapped_data <- slice_sample(data, n = nrow(data), replace = TRUE)
+  }
+  bootstrapped_explanation <- bootstrapped_data |> 
+    filter(n_explanation > 0 | n_alter == 0)
+  bootstrapped_no_explanation <- bootstrapped_data |> 
+    filter(n_explanation < 1 | n_alter == 0)
+  bootstrapped_explanation_no_outlier <- bootstrapped_explanation |> 
+    filter(avg < 7000)
+  bootstrapped_no_explanation_no_outlier <- bootstrapped_no_explanation |> 
+    filter(avg < 7000)
+  lm_bootstrapped_explanation <- (avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_explanation)
+  lm_bootstrapped_no_explanation <- (avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_no_explanation)
+  lm_bootstrapped_explanation_log_avg <- (log_avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_explanation)
+  lm_bootstrapped_no_explanation_log_avg <- (log_avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_no_explanation)
+  lm_bootstrapped_explanation_log_mae <- (log_mae ~ n_date + n_alter) |> 
+    lm(bootstrapped_explanation)
+  lm_bootstrapped_no_explanation_log_mae <- (log_mae ~ n_date + n_alter) |> 
+    lm(bootstrapped_no_explanation)
+  lm_bootstrapped_explanation_no_outlier <- (avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_explanation_no_outlier)
+  lm_bootstrapped_no_explanation_no_outlier <- (avg ~ n_date + n_alter) |> 
+    lm(bootstrapped_no_explanation_no_outlier)
+  output <- c(i,
+    lm_bootstrapped_explanation$coefficients["n_alter"] -
+    lm_bootstrapped_no_explanation$coefficients["n_alter"],
+    lm_bootstrapped_explanation_log_avg$coefficients["n_alter"] -
+    lm_bootstrapped_no_explanation_log_avg$coefficients["n_alter"],
+    lm_bootstrapped_explanation_log_mae$coefficients["n_alter"] -
+    lm_bootstrapped_no_explanation_log_mae$coefficients["n_alter"],
+  lm_bootstrapped_explanation_no_outlier$coefficients["n_alter"] -
+    lm_bootstrapped_no_explanation_no_outlier$coefficients["n_alter"])
+  names(output) <- c("i", "avg", "log_avg", "log_mae", "no_outlier")
+  output
+}
+set.seed(0)
+bootstrapped_n_alter <- map_dfr(0:2000, ~ bootstrap_n_alter(data, .x))
+filter(bootstrapped_n_alter, i == 0)
+bootstrapped_n_alter |> 
+  filter(i != 0) |>
+  summarise(
+    avg_ci_lo = quantile(avg, 0.025),
+    avg_ci_hi = quantile(avg, 0.975),
+    log_avg_ci_lo = quantile(log_avg, 0.025),
+    log_avg_ci_hi = quantile(log_avg, 0.975),
+    log_mae_ci_lo = quantile(log_mae, 0.025),
+    log_mae_ci_hi = quantile(log_mae, 0.975),
+    no_outlier_ci_lo = quantile(no_outlier, 0.025),
+    no_outlier_ci_hi = quantile(no_outlier, 0.975)
+  )
+# Exposure to reality reduces overestimation
+# No evidence that exposure to others reduces overestimation when adjusting for 
+# number of explanations, but there is evidence that it reduces spread
+lm_robust(avg ~ n_date + n_alter, data)
+lm_robust(log_avg ~ n_date + n_alter, data)
+lm_robust(log_mae ~ n_date + n_alter, data)
+lm_std <- lm_robust(std ~ n_date + n_alter, data)
+lm_std
+confint(lm_std)
+lm_robust(log_std ~ n_date + n_alter, data)
+lm_robust(avg ~ n_date + n_alter, data_no_outlier)
+lm_robust(std ~ n_date + n_alter, data_no_outlier)
+
+# Exposure to reality reduces overestimation
+# No evidence that exposure to others reduces overestimation when adjusting for 
+# number of explanations, but there is evidence that it reduces spread
+# There is evidence that exposure to explanations reduces overestimation, but 
+# there is no evidence that it reduces spread. In fact, the spread increased a
+# little.
+lm_data <- lm_robust(avg ~ n_date + n_alter + n_explanation, data)
+lm_data
+confint(lm_data)
+lm_robust(log_avg ~ n_date + n_alter + n_explanation, data)
+lm_robust(log_mae ~ n_date + n_alter + n_explanation, data)
+lm_robust(std ~ n_date + n_alter + n_explanation, data)
+lm_robust(log_std ~ n_date + n_alter + n_explanation, data)
+lm_robust(avg ~ n_date + n_alter + n_explanation, data_no_outlier)
+lm_robust(std ~ n_date + n_alter + n_explanation, data_no_outlier)
+meanCI(data$avg[data$n_date == "No Environmental Feedback"])
+meanCI(data$avg[data$n_date == "Environmental Feedback"])
+meanCI(data$std[data$n_date == "No Environmental Feedback"])
+meanCI(data$std[data$n_date == "Environmental Feedback"])
+
+
+# Very little evidence that exposure to reality reduces overestimation to a 
+# greater degree when there is exposure to others.
+# Mixed evidence that exposure to reality decreases spread to a lesser degree
+# when there is exposure to others.
+lm_robust(avg ~ n_date * n_alter, data)
+lm_robust(log_avg ~ n_date * n_alter, data)
+lm_robust(log_mae ~ n_date * n_alter, data)
+lm_robust(std ~ n_date * n_alter, data)
+lm_robust(log_std ~ n_date * n_alter, data)
+lm_robust(avg ~ n_date * n_alter, data_no_outlier)
+lm_robust(std ~ n_date * n_alter, data_no_outlier)
+
+# Very little evidence that exposure to reality reduces overestimation 
+# to a greater degree when there is exposure to others, holding constant 
+# number of explanations.
+# Mixed evidence that exposure to reality decreases spread to a lesser degree
+# when there is exposure to others, holding constant number of explanations
+lm_robust(avg ~ n_date * n_alter + n_explanation, data)
+lm_robust(log_avg ~ n_date * n_alter + n_explanation, data)
+lm_robust(log_mae ~ n_date * n_alter + n_explanation, data)
+lm_robust(std ~ n_date * n_alter + n_explanation, data)
+lm_robust(log_std ~ n_date * n_alter + n_explanation, data)
+lm_robust(avg ~ n_date * n_alter + n_explanation, data_no_outlier)
+lm_robust(std ~ n_date * n_alter + n_explanation, data_no_outlier)
+
+# No evidence that exposure to reality reduces overestimation or spread to a 
+# greater degree when there is exposure to explanations.
+lm_robust(avg ~ n_date * explanation_on + n_alter, data)
+lm_robust(log_avg ~ n_date * explanation_on + n_alter, data)
+lm_robust(log_mae ~ n_date * explanation_on + n_alter, data)
+lm_robust(std ~ n_date * explanation_on + n_alter, data)
+lm_robust(log_std ~ n_date * explanation_on + n_alter, data)
+lm_robust(avg ~ n_date * explanation_on + n_alter, data_no_outlier)
+lm_robust(std ~ n_date * explanation_on + n_alter, data_no_outlier)
+
+# Mixed evidence that exposure to others reduces overestimation to a 
+# greater degree when there is exposure to explanations. 
+# No such evidence for spread.
+# If anything, the effect on spread is slightly smaller when there is exposure 
+# to explanations.
+lm_robust(avg ~ n_date + n_alter * explanation_on, data)
+lm_robust(log_avg ~ n_date + n_alter * explanation_on, data)
+lm_robust(log_mae ~ n_date + n_alter * explanation_on, data)
+lm_robust(std ~ n_date + n_alter * explanation_on, data)
+lm_robust(log_std ~ n_date + n_alter * explanation_on, data)
+lm_robust(avg ~ n_date + n_alter * explanation_on, data_no_outlier)
+lm_robust(std ~ n_date + n_alter * explanation_on, data_no_outlier)
+```
+
+```{r plot1}
+# Visualization
+theme_tommy <- function() {
+  theme_foundation() +
+  theme(
+    panel.background = element_rect(color = NA),
+    plot.background = element_rect(color = NA),
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_rect(color = NA),
+    panel.grid.major = element_line(color="#f0f0f0"),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour="black"),
+    legend.key =element_rect(color = NA),
+    strip.background=element_rect(color= NA)
+  )
+}
+
+# Plot mean predicted words
+plot1 <- data |>
+  ggplot(aes(n_alter_factor, avg, group = explanation, color = explanation)) +
+  geom_point(
+    size = 2, alpha = .8, stroke = NA,
+    position = position_dodge(width = .5)
+  ) +
+  facet_wrap(~n_date, scales = "free_y") +
+  scale_color_colorblind() +
+  labs(
+    x = "Number of Others' Predictions Provided",
+    y = "Mean Number of Predicted Words across Agents",
+    color = "Explanations\nProvided by Others",
+    caption = "Actual Outcome: 1,950 Words"
+  ) +
+  theme_tommy()
+ggsave("plot1.png", plot1, width = 7, height = 5, dpi = 300)
+```
+
+```{r plot_check}
+# Mixed evidence that exposure to others increases overestimation when there's 
+# exposure to others predictions but no explanation provided by others.
+lm_robust(avg ~ n_date + n_alter, no_explanation_alter12)
+lm_robust(log_avg ~ n_date + n_alter, no_explanation_alter12)
+lm_robust(log_mae ~ n_date + n_alter, no_explanation_alter12)
+lm_robust(avg ~ n_date + n_alter, no_explanation_social_no_alter12)
+
+# Quite little evidence that exposure to others decreases overestimation when 
+# there's exposure to at most 1 other's predictions but no explanation provided 
+# by others.
+lm_robust(avg ~ n_date + n_alter, no_explanation_alter01)
+lm_robust(log_avg ~ n_date + n_alter, no_explanation_alter01)
+lm_robust(log_mae ~ n_date + n_alter, no_explanation_alter01)
+lm_robust(avg ~ n_date + n_alter, no_explanation_social_no_alter01)
+```
+
+
+```{r plot2}
+# Plot std of predicted words
+plot2 <- data |>
+  ggplot(aes(n_alter_factor, std, group = explanation, color = explanation)) +
+  geom_point(
+    size = 2, alpha = .8, stroke = NA,
+    position = position_dodge(width = .5)
+  ) +
+  facet_wrap(~n_date, scales = "free_y") +
+  scale_color_colorblind() +
+  labs(
+    x = "Number of Other's Predictions Provided",
+    y = "SD of Predicted Words across 5 Agents",
+    color = "Explanations\nProvided by Others"
+  ) +
+  theme_tommy()
+ggsave("plot2.png", plot2, width = 7, height = 5, dpi = 300)
+```
